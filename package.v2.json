@@ -1,15 +1,16 @@
 {
   "MediaTitleLock": {
     "name": "媒体标题固定",
-    "description": "按媒体来源和来源内 ID 固定首次入库标题，避免元数据改名后生成重复媒体目录。",
+    "description": "按媒体来源和来源内 ID 固定首次入库标题与分类，避免元数据变化后生成重复媒体目录。",
     "labels": "文件整理,媒体库",
-    "version": "1.0.2",
+    "version": "1.0.3",
     "icon": "mediatitlelock.svg",
     "author": "baixiaofei",
     "level": 1,
     "v3": false,
     "release": true,
     "history": {
+      "v1.0.3": "以 MoviePilot 分类替换媒体根目录绑定，支持分类下拉、自动记录分类及按 TMDB ID、标题筛选。",
       "v1.0.2": "移除 Emby 存量导入，将启用设置和人工绑定维护合并到插件主页面。",
       "v1.0.1": "绑定维度调整为媒体来源加来源内 ID；保存人工绑定时直接执行，并自动迁移旧数据库。",
       "v1.0.0": "支持成功整理后自动绑定标题、整理时复用绑定、Emby 存量导入及人工维护绑定。"

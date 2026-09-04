@@ -28,7 +28,7 @@ const headers = [
   { title: '媒体身份', key: 'identity', sortable: false },
   { title: '固定标题', key: 'canonical_title' },
   { title: '年份', key: 'year' },
-  { title: '媒体根目录', key: 'root' },
+  { title: '分类', key: 'category' },
   { title: '来源', key: 'origin_text' },
   { title: '更新时间', key: 'updated_at' },
   { title: '操作', key: 'actions', sortable: false },
@@ -36,6 +36,7 @@ const headers = [
 
 const enabled = ref(false)
 const bindings = ref([])
+const categories = ref([])
 const total = ref(0)
 const loading = ref(false)
 const savingConfig = ref(false)
@@ -47,8 +48,9 @@ const form = reactive({
   media_id: '',
   canonical_title: '',
   canonical_year: '',
-  media_root_name: '',
+  media_category: '',
 })
+const filters = reactive({ tmdbid: '', title: '' })
 
 let noticeTimer
 const pluginBase = computed(() => `plugin/${props.pluginId || 'MediaTitleLock'}`)
@@ -85,7 +87,7 @@ function resetBindingForm() {
   form.media_id = ''
   form.canonical_title = ''
   form.canonical_year = ''
-  form.media_root_name = ''
+  form.media_category = ''
 }
 
 async function loadConfig() {
@@ -95,28 +97,57 @@ async function loadConfig() {
 }
 
 async function loadBindings() {
-  const result = unwrapResponse(await props.api.get(`${pluginBase.value}/bindings`))
+  const query = new URLSearchParams()
+  const tmdbid = String(filters.tmdbid || '').trim()
+  const title = String(filters.title || '').trim()
+  if (tmdbid) query.set('tmdbid', tmdbid)
+  if (title) query.set('title', title)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  const result = unwrapResponse(await props.api.get(`${pluginBase.value}/bindings${suffix}`))
   if (!result?.success) throw new Error(result?.message || '绑定列表加载失败')
   const items = result.data?.items || []
   bindings.value = items.map(item => ({
     ...item,
     identity: `${item.media_source} / ${item.media_id}`,
     year: item.canonical_year || '-',
-    root: item.media_root_name || '-',
+    category: item.media_category || '待补充',
     origin_text: originText(item.origin),
   }))
   total.value = Number(result.data?.total || 0)
 }
 
+async function loadCategories() {
+  const result = unwrapResponse(await props.api.get(`${pluginBase.value}/categories`))
+  if (!result?.success) throw new Error(result?.message || '分类加载失败')
+  categories.value = result.data?.items || []
+}
+
 async function refreshPage() {
   loading.value = true
   try {
-    await Promise.all([loadConfig(), loadBindings()])
+    await Promise.all([loadConfig(), loadCategories(), loadBindings()])
   } catch (error) {
     showMessage(error?.message || '页面加载失败', 'error')
   } finally {
     loading.value = false
   }
+}
+
+async function applyFilters() {
+  loading.value = true
+  try {
+    await loadBindings()
+  } catch (error) {
+    showMessage(error?.message || '筛选失败', 'error')
+  } finally {
+    loading.value = false
+  }
+}
+
+async function clearFilters() {
+  filters.tmdbid = ''
+  filters.title = ''
+  await applyFilters()
 }
 
 async function saveConfig() {
@@ -138,12 +169,17 @@ async function saveConfig() {
 async function submitBinding() {
   const mediaId = String(form.media_id || '').trim()
   const canonicalTitle = String(form.canonical_title || '').trim()
+  const mediaCategory = String(form.media_category || '').trim()
   if (!mediaId) {
     showMessage('来源内 ID 不能为空', 'warning')
     return
   }
   if (form.operation === 'upsert' && !canonicalTitle) {
     showMessage('固定标题不能为空', 'warning')
+    return
+  }
+  if (form.operation === 'upsert' && !mediaCategory) {
+    showMessage('分类不能为空', 'warning')
     return
   }
 
@@ -158,7 +194,7 @@ async function submitBinding() {
           media_id: mediaId,
           canonical_title: canonicalTitle,
           canonical_year: String(form.canonical_year || '').trim(),
-          media_root_name: String(form.media_root_name || '').trim(),
+          media_category: mediaCategory,
         }
     const result = unwrapResponse(await props.api.post(`${pluginBase.value}/${path}`, payload))
     if (!result?.success) throw new Error(result?.message || '操作失败')
@@ -179,7 +215,7 @@ function editBinding(item) {
   form.media_id = row.media_id || ''
   form.canonical_title = row.canonical_title || ''
   form.canonical_year = row.canonical_year || ''
-  form.media_root_name = row.media_root_name || ''
+  form.media_category = row.media_category || ''
 }
 
 async function deleteBinding(item) {
@@ -263,7 +299,7 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
         <VCardTitle class="text-subtitle-1">人工维护绑定</VCardTitle>
         <VCardText>
           <VAlert type="info" variant="tonal" density="compact" class="mb-4">
-            绑定键为媒体来源 + 来源内 ID。新增或修改时需填写固定标题；删除时只需填写媒体来源和来源内 ID。
+            绑定键为媒体来源 + 来源内 ID。新增或修改时需填写固定标题并选择分类；自动下载首次整理成功后会自动补充记录。
           </VAlert>
           <VForm @submit.prevent="submitBinding">
             <VRow dense>
@@ -315,12 +351,14 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
                 />
               </VCol>
               <VCol v-if="form.operation === 'upsert'" cols="12" md="4">
-                <VTextField
-                  v-model="form.media_root_name"
-                  label="现有媒体根目录名（可选）"
+                <VSelect
+                  v-model="form.media_category"
+                  :items="categories"
+                  label="分类 *"
                   variant="outlined"
                   density="compact"
                   hide-details="auto"
+                  no-data-text="MoviePilot 暂无可用分类"
                 />
               </VCol>
             </VRow>
@@ -345,6 +383,38 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
           标题绑定
           <VChip size="small" variant="tonal" color="primary" class="ms-2">{{ total }}</VChip>
         </VCardTitle>
+        <VCardText class="pb-0">
+          <VRow dense align="center">
+            <VCol cols="12" sm="4">
+              <VTextField
+                v-model="filters.tmdbid"
+                label="TMDB ID"
+                variant="outlined"
+                density="compact"
+                clearable
+                hide-details
+                @keyup.enter="applyFilters"
+              />
+            </VCol>
+            <VCol cols="12" sm="4">
+              <VTextField
+                v-model="filters.title"
+                label="标题"
+                variant="outlined"
+                density="compact"
+                clearable
+                hide-details
+                @keyup.enter="applyFilters"
+              />
+            </VCol>
+            <VCol cols="12" sm="4" class="d-flex ga-2">
+              <VBtn color="primary" variant="tonal" :loading="loading" @click="applyFilters">
+                筛选
+              </VBtn>
+              <VBtn variant="text" :disabled="loading" @click="clearFilters">重置</VBtn>
+            </VCol>
+          </VRow>
+        </VCardText>
         <VDataTable
           :headers="headers"
           :items="bindings"

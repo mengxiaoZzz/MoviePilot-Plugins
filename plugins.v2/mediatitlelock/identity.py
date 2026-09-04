@@ -72,22 +72,3 @@ def apply_locked_title(rename_dict: dict, title: str, year: Optional[str]) -> No
         rename_dict["title_year"] = f"{locked_title} ({locked_year})"
     else:
         rename_dict["title_year"] = locked_title
-
-
-def replace_media_root(rendered_path: str, media_root_name: Optional[str]) -> str:
-    """仅替换重命名结果的第一级媒体目录，并保留原路径分隔符。"""
-
-    path = str(rendered_path or "")
-    root_name = str(media_root_name or "").strip()
-    if not path or not root_name or root_name in {".", ".."}:
-        return path
-    if "/" in root_name or "\\" in root_name:
-        return path
-    if path.startswith(("/", "\\")) or (len(path) > 1 and path[1] == ":"):
-        return path
-
-    separators = [index for index in (path.find("/"), path.find("\\")) if index > 0]
-    if not separators:
-        return path
-    first_separator = min(separators)
-    return f"{root_name}{path[first_separator:]}"

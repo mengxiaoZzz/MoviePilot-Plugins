@@ -46,14 +46,28 @@ event_module = types.ModuleType("app.core.event")
 event_module.Event = object
 event_module.eventmanager = EventManager()
 log_module = types.ModuleType("app.log")
-log_module.logger = types.SimpleNamespace(info=lambda *args: None, exception=lambda *args: None)
+log_module.logger = types.SimpleNamespace(
+    info=lambda *args: None,
+    warning=lambda *args: None,
+    exception=lambda *args: None,
+)
 plugins_module = types.ModuleType("app.plugins")
 plugins_module._PluginBase = PluginBase
+chain_module = types.ModuleType("app.chain")
+media_chain_module = types.ModuleType("app.chain.media")
+
+
+class MediaChain:
+    def media_category(self):
+        return {"电影": ["华语电影", "外语电影"], "电视剧": ["国产剧", "日韩剧"]}
+
+
+media_chain_module.MediaChain = MediaChain
 schemas_module = types.ModuleType("app.schemas")
 types_module = types.ModuleType("app.schemas.types")
 types_module.ChainEventType = types.SimpleNamespace(
     TransferRenameBuild="TransferRenameBuild",
-    TransferRename="TransferRename",
+    ResourceDownload="ResourceDownload",
 )
 types_module.EventType = types.SimpleNamespace(TransferComplete="TransferComplete")
 pydantic_module = types.ModuleType("pydantic")
@@ -63,6 +77,8 @@ pydantic_module.Field = field
 sys.modules.update(
     {
         "app": app_module,
+        "app.chain": chain_module,
+        "app.chain.media": media_chain_module,
         "app.core": core_module,
         "app.core.event": event_module,
         "app.log": log_module,
@@ -105,6 +121,7 @@ class PluginTest(unittest.TestCase):
                 ("/config", ("GET",)),
                 ("/config", ("POST",)),
                 ("/bindings", ("GET",)),
+                ("/categories", ("GET",)),
                 ("/bindings", ("POST",)),
                 ("/bindings/delete", ("POST",)),
             },
@@ -133,6 +150,7 @@ class PluginTest(unittest.TestCase):
                     media_id="330150",
                     canonical_title="固定标题",
                     canonical_year="2026",
+                    media_category="日韩剧",
                 )
             )
             queried = self.plugin.api_bindings()
@@ -146,7 +164,78 @@ class PluginTest(unittest.TestCase):
         self.assertTrue(saved.success)
         self.assertEqual(queried.data["total"], 1)
         self.assertEqual(queried.data["items"][0]["canonical_title"], "固定标题")
+        self.assertEqual(queried.data["items"][0]["media_category"], "日韩剧")
         self.assertTrue(deleted.success)
+
+    def test_categories_come_from_moviepilot(self):
+        response = self.plugin.api_categories()
+
+        self.assertTrue(response.success)
+        self.assertEqual(
+            response.data["items"],
+            ["华语电影", "外语电影", "国产剧", "日韩剧"],
+        )
+
+    def test_bound_category_is_applied_before_automatic_download(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.plugin._store = plugin_module.BindingStore(
+                Path(directory) / "bindings.sqlite3"
+            )
+            self.plugin._enabled = True
+            self.plugin._store.upsert(
+                plugin_module.TitleBinding(
+                    media_source="themoviedb",
+                    media_id="330150",
+                    canonical_title="固定标题",
+                    media_category="日韩剧",
+                    origin="manual",
+                )
+            )
+            mediainfo = types.SimpleNamespace(
+                source="themoviedb",
+                media_id="330150",
+                category="欧美剧",
+            )
+            event = types.SimpleNamespace(
+                event_data=types.SimpleNamespace(
+                    context=types.SimpleNamespace(media_info=mediainfo),
+                    options={"media_category": "欧美剧"},
+                )
+            )
+
+            self.plugin.lock_download_category(event)
+
+        self.assertEqual(mediainfo.category, "日韩剧")
+        self.assertEqual(event.event_data.options["media_category"], "日韩剧")
+
+    def test_first_successful_transfer_automatically_records_category(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.plugin._store = plugin_module.BindingStore(
+                Path(directory) / "bindings.sqlite3"
+            )
+            self.plugin._enabled = True
+            mediainfo = types.SimpleNamespace(
+                source="themoviedb",
+                media_id="330150",
+                title="首次标题",
+                year="2026",
+                category="日韩剧",
+            )
+            transferinfo = types.SimpleNamespace(
+                success=True,
+                target_diritem=types.SimpleNamespace(path="/media/电视剧/日韩剧/首次标题"),
+            )
+
+            self.plugin.remember_successful_transfer(
+                types.SimpleNamespace(
+                    event_data={"mediainfo": mediainfo, "transferinfo": transferinfo}
+                )
+            )
+            saved = self.plugin._store.get("themoviedb", "330150")
+
+        self.assertIsNotNone(saved)
+        self.assertEqual(saved.canonical_title, "首次标题")
+        self.assertEqual(saved.media_category, "日韩剧")
 
 
 if __name__ == "__main__":

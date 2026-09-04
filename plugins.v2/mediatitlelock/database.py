@@ -1,13 +1,15 @@
 import sqlite3
 import threading
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import Iterator, List, Optional, Tuple
 
 
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 MIGRATION_BACKUP_SUFFIX = ".before-source-id-v2.bak"
+CATEGORY_MIGRATION_BACKUP_SUFFIX = ".before-category-v3.bak"
 
 
 @dataclass(frozen=True)
@@ -18,6 +20,8 @@ class TitleBinding:
     media_id: str
     canonical_title: str
     canonical_year: str = ""
+    media_category: str = ""
+    # 仅保留该字段以兼容旧数据库；1.0.3 起不再读取或写入媒体根目录。
     media_root_name: str = ""
     origin: str = "automatic"
     server_name: str = ""
@@ -47,12 +51,20 @@ class BindingStore:
     def _key(media_source: str, media_id: str) -> tuple:
         return media_source, media_id
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self._database_path, timeout=30)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout = 30000")
         connection.execute("PRAGMA journal_mode = WAL")
-        return connection
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
 
     @staticmethod
     def _create_table(connection: sqlite3.Connection, table_name: str = "title_bindings") -> None:
@@ -63,6 +75,7 @@ class BindingStore:
                 media_id TEXT NOT NULL,
                 canonical_title TEXT NOT NULL,
                 canonical_year TEXT NOT NULL DEFAULT '',
+                media_category TEXT NOT NULL DEFAULT '',
                 media_root_name TEXT NOT NULL DEFAULT '',
                 origin TEXT NOT NULL,
                 server_name TEXT NOT NULL DEFAULT '',
@@ -86,17 +99,39 @@ class BindingStore:
                 self._migrate_legacy_schema(connection)
             else:
                 self._create_table(connection)
+            self._ensure_category_column(connection)
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS idx_title_bindings_updated_at "
                 "ON title_bindings(updated_at DESC)"
             )
 
     def _backup_before_migration(self, connection: sqlite3.Connection) -> None:
-        backup_path = Path(f"{self._database_path}{MIGRATION_BACKUP_SUFFIX}")
+        self._backup_database(connection, MIGRATION_BACKUP_SUFFIX)
+
+    def _backup_database(
+        self, connection: sqlite3.Connection, suffix: str
+    ) -> None:
+        backup_path = Path(f"{self._database_path}{suffix}")
         if backup_path.exists():
             return
-        with sqlite3.connect(backup_path) as backup_connection:
+        backup_connection = sqlite3.connect(backup_path)
+        try:
             connection.backup(backup_connection)
+        finally:
+            backup_connection.close()
+
+    def _ensure_category_column(self, connection: sqlite3.Connection) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(title_bindings)").fetchall()
+        }
+        if "media_category" in columns:
+            return
+        self._backup_database(connection, CATEGORY_MIGRATION_BACKUP_SUFFIX)
+        connection.execute(
+            "ALTER TABLE title_bindings "
+            "ADD COLUMN media_category TEXT NOT NULL DEFAULT ''"
+        )
 
     def _migrate_legacy_schema(self, connection: sqlite3.Connection) -> None:
         rows = connection.execute(
@@ -109,15 +144,16 @@ class BindingStore:
                 """
                 INSERT OR REPLACE INTO title_bindings_source_id (
                     media_source, media_id, canonical_title, canonical_year,
-                    media_root_name, origin, server_name, server_item_id,
-                    media_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    media_category, media_root_name, origin, server_name,
+                    server_item_id, media_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["media_source"],
                     row["media_id"],
                     row["canonical_title"],
                     row["canonical_year"],
+                    row["media_category"] if "media_category" in row.keys() else "",
                     row["media_root_name"],
                     row["origin"],
                     row["server_name"],
@@ -161,6 +197,7 @@ class BindingStore:
             binding.media_id,
             binding.canonical_title,
             binding.canonical_year,
+            binding.media_category,
             binding.media_root_name,
             binding.origin,
             binding.server_name,
@@ -174,9 +211,9 @@ class BindingStore:
                 """
                 INSERT OR IGNORE INTO title_bindings (
                     media_source, media_id, canonical_title, canonical_year,
-                    media_root_name, origin, server_name, server_item_id,
-                    media_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    media_category, media_root_name, origin, server_name,
+                    server_item_id, media_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 values,
             )
@@ -194,12 +231,13 @@ class BindingStore:
                 """
                 INSERT INTO title_bindings (
                     media_source, media_id, canonical_title, canonical_year,
-                    media_root_name, origin, server_name, server_item_id,
-                    media_path, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    media_category, media_root_name, origin, server_name,
+                    server_item_id, media_path, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(media_source, media_id) DO UPDATE SET
                     canonical_title = excluded.canonical_title,
                     canonical_year = excluded.canonical_year,
+                    media_category = excluded.media_category,
                     media_root_name = excluded.media_root_name,
                     origin = excluded.origin,
                     server_name = excluded.server_name,
@@ -212,6 +250,7 @@ class BindingStore:
                     binding.media_id,
                     binding.canonical_title,
                     binding.canonical_year,
+                    binding.media_category,
                     binding.media_root_name,
                     binding.origin,
                     binding.server_name,
@@ -251,22 +290,49 @@ class BindingStore:
                 self._cache.pop(self._key(media_source, media_id), None)
             return deleted
 
-    def list_bindings(self, limit: int = 500) -> List[TitleBinding]:
+    @staticmethod
+    def _filter_clause(tmdbid: str = "", title: str = "") -> Tuple[str, List[str]]:
+        conditions = []
+        values = []
+        tmdbid = str(tmdbid or "").strip()
+        title = str(title or "").strip()
+        if tmdbid:
+            conditions.append(
+                "(media_source = 'themoviedb' AND media_id LIKE ? ESCAPE '\\')"
+            )
+            values.append(
+                f"%{tmdbid.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')}%"
+            )
+        if title:
+            conditions.append("canonical_title LIKE ? ESCAPE '\\'")
+            values.append(
+                f"%{title.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_')}%"
+            )
+        return (f" WHERE {' AND '.join(conditions)}" if conditions else ""), values
+
+    def list_bindings(
+        self, limit: int = 500, tmdbid: str = "", title: str = ""
+    ) -> List[TitleBinding]:
         """按更新时间倒序返回绑定记录。"""
 
         safe_limit = min(max(int(limit), 1), 5000)
+        clause, values = self._filter_clause(tmdbid=tmdbid, title=title)
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM title_bindings ORDER BY updated_at DESC LIMIT ?",
-                (safe_limit,),
+                f"SELECT * FROM title_bindings{clause} "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (*values, safe_limit),
             ).fetchall()
         return [self._from_row(row) for row in rows]
 
-    def count(self) -> int:
+    def count(self, tmdbid: str = "", title: str = "") -> int:
         """返回绑定总数。"""
 
+        clause, values = self._filter_clause(tmdbid=tmdbid, title=title)
         with self._connect() as connection:
-            row = connection.execute("SELECT COUNT(*) AS total FROM title_bindings").fetchone()
+            row = connection.execute(
+                f"SELECT COUNT(*) AS total FROM title_bindings{clause}", values
+            ).fetchone()
         return int(row["total"])
 
     def clear_cache(self) -> None:

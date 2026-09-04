@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from app import schemas
+from app.chain.media import MediaChain
 from app.core.event import Event, eventmanager
 from app.log import logger
 from app.plugins import _PluginBase
@@ -13,7 +14,6 @@ from .identity import (
     apply_locked_title,
     extract_media_identity,
     normalize_source,
-    replace_media_root,
 )
 
 
@@ -30,7 +30,7 @@ class BindingRequest(BaseModel):
     media_id: str = Field(min_length=1, max_length=80)
     canonical_title: str = Field(min_length=1, max_length=255)
     canonical_year: str = Field(default="", max_length=20)
-    media_root_name: str = Field(default="", max_length=255)
+    media_category: str = Field(min_length=1, max_length=255)
 
 
 class BindingDeleteRequest(BaseModel):
@@ -44,9 +44,9 @@ class MediaTitleLock(_PluginBase):
     """按“媒体来源 + 来源内 ID”固定整理标题。"""
 
     plugin_name = "媒体标题固定"
-    plugin_desc = "首次入库后固定媒体标题，避免元数据标题变化产生多个目录。"
+    plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.2"
+    plugin_version = "1.0.3"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -98,6 +98,13 @@ class MediaTitleLock(_PluginBase):
                 "methods": ["GET"],
                 "auth": "bear",
                 "summary": "查询固定标题绑定",
+            },
+            {
+                "path": "/categories",
+                "endpoint": self.api_categories,
+                "methods": ["GET"],
+                "auth": "bear",
+                "summary": "查询 MoviePilot 媒体分类",
             },
             {
                 "path": "/bindings",
@@ -158,31 +165,27 @@ class MediaTitleLock(_PluginBase):
         except Exception as error:
             logger.exception(f"媒体标题固定：重命名上下文处理失败 - {error}")
 
-    @eventmanager.register(ChainEventType.TransferRename, priority=100)
-    def lock_media_root(self, event: Event) -> None:
-        """在路径渲染后复用绑定中保存的媒体根目录名。"""
+    @eventmanager.register(ChainEventType.ResourceDownload, priority=100)
+    def lock_download_category(self, event: Event) -> None:
+        """下载任务建立前注入已绑定的固定分类。"""
 
         if not self._enabled or not event or not event.event_data:
             return
         try:
             data = event.event_data
-            rename_dict = getattr(data, "rename_dict", None)
-            if not isinstance(rename_dict, dict):
-                return
-            identity = extract_media_identity(rename_dict.get("__mediainfo__"))
+            context = getattr(data, "context", None)
+            mediainfo = getattr(context, "media_info", None)
+            identity = extract_media_identity(mediainfo)
             if not identity:
                 return
             binding = self._require_store().get(identity.media_source, identity.media_id)
-            if not binding or not binding.media_root_name:
+            if not binding or not binding.media_category:
                 return
-            current = data.updated_str if data.updated and data.updated_str else data.render_str
-            updated = replace_media_root(current, binding.media_root_name)
-            if updated != current:
-                data.updated = True
-                data.updated_str = updated
-                data.source = self.plugin_name
+            mediainfo.category = binding.media_category
+            if isinstance(getattr(data, "options", None), dict):
+                data.options["media_category"] = binding.media_category
         except Exception as error:
-            logger.exception(f"媒体标题固定：媒体根目录处理失败 - {error}")
+            logger.exception(f"媒体标题固定：下载分类处理失败 - {error}")
 
     @eventmanager.register(EventType.TransferComplete)
     def remember_successful_transfer(self, event: Event) -> None:
@@ -198,17 +201,22 @@ class MediaTitleLock(_PluginBase):
                 return
             identity = extract_media_identity(mediainfo)
             title = str(getattr(mediainfo, "title", "") or "").strip()
-            if not identity or not title:
+            category = str(getattr(mediainfo, "category", "") or "").strip()
+            if not identity or not title or not category:
+                if identity and title and not category:
+                    logger.warning(
+                        f"媒体标题固定：未记录 {identity.media_source}/"
+                        f"{identity.media_id}，整理结果没有媒体分类"
+                    )
                 return
             target_diritem = transferinfo.target_diritem
-            root_name = str(getattr(target_diritem, "name", "") or "").strip()
             inserted = self._require_store().insert_if_absent(
                 TitleBinding(
                     media_source=identity.media_source,
                     media_id=identity.media_id,
                     canonical_title=title,
                     canonical_year=str(getattr(mediainfo, "year", "") or ""),
-                    media_root_name=root_name,
+                    media_category=category,
                     origin="automatic",
                     media_path=str(getattr(target_diritem, "path", "") or ""),
                 )
@@ -243,14 +251,36 @@ class MediaTitleLock(_PluginBase):
             data={"enabled": self._enabled},
         )
 
-    def api_bindings(self, limit: int = 500) -> schemas.Response:
+    def api_bindings(
+        self,
+        limit: int = 500,
+        tmdbid: str = "",
+        title: str = "",
+    ) -> schemas.Response:
         """查询固定标题绑定。"""
 
-        bindings = [item.to_dict() for item in self._require_store().list_bindings(limit)]
+        store = self._require_store()
+        bindings = [
+            item.to_dict()
+            for item in store.list_bindings(limit=limit, tmdbid=tmdbid, title=title)
+        ]
         return schemas.Response(
             success=True,
             message="查询成功",
-            data={"total": self._require_store().count(), "items": bindings},
+            data={
+                "total": store.count(tmdbid=tmdbid, title=title),
+                "items": bindings,
+            },
+        )
+
+    def api_categories(self) -> schemas.Response:
+        """查询 MoviePilot 当前配置的媒体分类。"""
+
+        categories = self._available_categories()
+        return schemas.Response(
+            success=True,
+            message="查询成功",
+            data={"items": categories},
         )
 
     def api_save_binding(self, request: BindingRequest) -> schemas.Response:
@@ -260,6 +290,11 @@ class MediaTitleLock(_PluginBase):
             binding = self._binding_from_request(request)
         except ValueError as error:
             return schemas.Response(success=False, message=str(error))
+        if binding.media_category not in self._available_categories():
+            return schemas.Response(
+                success=False,
+                message="所选分类不在 MoviePilot 当前分类配置中",
+            )
         saved = self._require_store().upsert(binding)
         return schemas.Response(
             success=saved,
@@ -283,19 +318,32 @@ class MediaTitleLock(_PluginBase):
         source = normalize_source(request.media_source)
         media_id = request.media_id.strip()
         title = request.canonical_title.strip()
-        root_name = request.media_root_name.strip()
-        if not source or not media_id or not title:
-            raise ValueError("媒体来源、来源内 ID 和固定标题不能为空")
-        if root_name in {".", ".."} or "/" in root_name or "\\" in root_name:
-            raise ValueError("媒体根目录名不能包含路径分隔符")
+        category = request.media_category.strip()
+        if not source or not media_id or not title or not category:
+            raise ValueError("媒体来源、来源内 ID、固定标题和分类不能为空")
         return TitleBinding(
             media_source=source,
             media_id=media_id,
             canonical_title=title,
             canonical_year=request.canonical_year.strip(),
-            media_root_name=root_name,
+            media_category=category,
             origin="manual",
         )
+
+    @staticmethod
+    def _available_categories() -> List[str]:
+        category_config = MediaChain().media_category() or {}
+        categories = []
+        seen = set()
+        for group_items in category_config.values():
+            if not isinstance(group_items, (list, tuple, set)):
+                continue
+            for item in group_items:
+                category = str(item or "").strip()
+                if category and category not in seen:
+                    seen.add(category)
+                    categories.append(category)
+        return categories
 
     def _require_store(self) -> BindingStore:
         if self._store is None:
