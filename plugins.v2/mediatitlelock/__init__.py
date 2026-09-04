@@ -46,7 +46,7 @@ class MediaTitleLock(_PluginBase):
     plugin_name = "媒体标题固定"
     plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.5"
+    plugin_version = "1.0.6"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -136,7 +136,7 @@ class MediaTitleLock(_PluginBase):
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """使用 Vue 主页面承载配置和绑定管理。"""
 
-        return "vue", "dist/assets"
+        return "vue", "dist/v1.0.6/assets"
 
     def stop_service(self) -> None:
         """清理插件内存缓存。"""

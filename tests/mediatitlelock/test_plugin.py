@@ -105,7 +105,11 @@ class PluginTest(unittest.TestCase):
         self.plugin = plugin_module.MediaTitleLock()
 
     def test_uses_vue_main_page_without_separate_form(self):
-        self.assertEqual(self.plugin.get_render_mode(), ("vue", "dist/assets"))
+        render_mode, dist_path = self.plugin.get_render_mode()
+
+        self.assertEqual(render_mode, "vue")
+        self.assertEqual(dist_path, "dist/v1.0.6/assets")
+        self.assertTrue((plugin_dir / dist_path / "remoteEntry.js").is_file())
         self.assertEqual(self.plugin.get_form(), (None, {}))
         self.assertIsNone(self.plugin.get_page())
 

@@ -22,6 +22,7 @@ export default defineConfig({
     }),
   ],
   build: {
+    outDir: 'dist/v1.0.6',
     target: 'esnext',
     minify: false,
     cssCodeSplit: true,
