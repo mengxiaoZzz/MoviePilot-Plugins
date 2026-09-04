@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
 
@@ -11,21 +10,11 @@ SOURCE_ALIASES = {
     "anilist": "anilist",
 }
 
-MEDIA_TYPE_ALIASES = {
-    "movie": "电影",
-    "电影": "电影",
-    "series": "电视剧",
-    "tv": "电视剧",
-    "电视剧": "电视剧",
-}
-
-
 @dataclass(frozen=True)
 class MediaIdentity:
     """媒体来源内唯一身份。"""
 
     media_source: str
-    media_type: str
     media_id: str
 
 
@@ -36,22 +25,10 @@ def normalize_source(value: Any) -> str:
     return SOURCE_ALIASES.get(source, source)
 
 
-def normalize_media_type(value: Any) -> str:
-    """将 MoviePilot 或 Emby 的媒体类型统一为中文类型。"""
-
-    raw_value = getattr(value, "value", value)
-    media_type = str(raw_value or "").strip().casefold()
-    return MEDIA_TYPE_ALIASES.get(media_type, str(raw_value or "").strip())
-
-
 def extract_media_identity(mediainfo: Any) -> Optional[MediaIdentity]:
-    """从 MoviePilot MediaInfo 提取来源、类型和来源内 ID。"""
+    """从 MoviePilot MediaInfo 提取媒体来源和来源内 ID。"""
 
     if mediainfo is None:
-        return None
-
-    media_type = normalize_media_type(getattr(mediainfo, "type", None))
-    if media_type not in {"电影", "电视剧"}:
         return None
 
     source = normalize_source(getattr(mediainfo, "source", None))
@@ -78,7 +55,6 @@ def extract_media_identity(mediainfo: Any) -> Optional[MediaIdentity]:
         return None
     return MediaIdentity(
         media_source=source,
-        media_type=media_type,
         media_id=str(media_id).strip(),
     )
 
@@ -115,19 +91,3 @@ def replace_media_root(rendered_path: str, media_root_name: Optional[str]) -> st
         return path
     first_separator = min(separators)
     return f"{root_name}{path[first_separator:]}"
-
-
-def emby_media_root(item: dict) -> str:
-    """从 Emby Movie/Series 条目计算媒体根目录名。"""
-
-    raw_path = str(item.get("Path") or "").strip()
-    if not raw_path:
-        return ""
-    path_class = PureWindowsPath if "\\" in raw_path else PurePosixPath
-    path = path_class(raw_path)
-    item_type = str(item.get("Type") or "").casefold()
-    if item_type == "movie":
-        return path.parent.name
-    if item_type == "series":
-        return path.name
-    return ""

@@ -25,7 +25,7 @@ MoviePilot-Plugins/
 
 | 插件 | ID | 说明 |
 | --- | --- | --- |
-| [媒体标题固定](plugins.v2/mediatitlelock/README.md) | `MediaTitleLock` | 固定首次入库或 Emby 已有标题，避免同一媒体生成多个名称不同的目录。 |
+| [媒体标题固定](plugins.v2/mediatitlelock/README.md) | `MediaTitleLock` | 固定首次入库标题，避免同一媒体生成多个名称不同的目录。 |
 
 ## 接入 MoviePilot
 

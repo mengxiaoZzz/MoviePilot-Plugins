@@ -7,9 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "plugins.v2" / "med
 
 from identity import (
     apply_locked_title,
-    emby_media_root,
     extract_media_identity,
-    normalize_media_type,
     replace_media_root,
 )
 
@@ -29,7 +27,6 @@ class IdentityTest(unittest.TestCase):
         identity = extract_media_identity(media)
 
         self.assertEqual(identity.media_source, "themoviedb")
-        self.assertEqual(identity.media_type, "电视剧")
         self.assertEqual(identity.media_id, "330150")
 
     def test_extract_media_identity_falls_back_to_tmdb_id(self):
@@ -46,7 +43,6 @@ class IdentityTest(unittest.TestCase):
         identity = extract_media_identity(media)
 
         self.assertEqual(identity.media_source, "themoviedb")
-        self.assertEqual(identity.media_type, "电影")
         self.assertEqual(identity.media_id, "1280738")
 
     def test_apply_locked_title_updates_title_year_consistently(self):
@@ -72,22 +68,6 @@ class IdentityTest(unittest.TestCase):
         self.assertEqual(replace_media_root("/library/title/file.mkv", "fixed"), "/library/title/file.mkv")
         self.assertEqual(replace_media_root("title/file.mkv", "../fixed"), "title/file.mkv")
         self.assertEqual(replace_media_root(r"C:\library\file.mkv", "fixed"), r"C:\library\file.mkv")
-
-    def test_emby_media_root_handles_movie_series_and_windows_paths(self):
-        self.assertEqual(
-            emby_media_root({"Type": "Series", "Path": "/media/tv/固定剧名 (2025)"}),
-            "固定剧名 (2025)",
-        )
-        self.assertEqual(
-            emby_media_root({"Type": "Movie", "Path": "/media/movie/固定片名 (2024)/movie.mkv"}),
-            "固定片名 (2024)",
-        )
-        self.assertEqual(
-            emby_media_root({"Type": "Movie", "Path": r"D:\Movie\固定片名 (2024)\movie.mkv"}),
-            "固定片名 (2024)",
-        )
-        self.assertEqual(normalize_media_type("Series"), "电视剧")
-
 
 if __name__ == "__main__":
     unittest.main()
