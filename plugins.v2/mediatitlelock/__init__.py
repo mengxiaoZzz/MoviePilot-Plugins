@@ -46,7 +46,7 @@ class MediaTitleLock(_PluginBase):
     plugin_name = "媒体标题固定"
     plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.3"
+    plugin_version = "1.0.4"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
