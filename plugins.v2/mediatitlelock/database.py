@@ -36,6 +36,15 @@ class TitleBinding:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class BindingPage:
+    items: List[TitleBinding]
+    total: int
+    page: int
+    page_size: int
+    page_count: int
+
+
 class BindingStore:
     """使用插件私有 SQLite 文件保存标题绑定。"""
 
@@ -334,6 +343,30 @@ class BindingStore:
                 f"SELECT COUNT(*) AS total FROM title_bindings{clause}", values
             ).fetchone()
         return int(row["total"])
+
+    def paginate(
+        self, page: int = 1, page_size: int = 25, tmdbid: str = "", title: str = ""
+    ) -> BindingPage:
+        """在同一读事务中统计、纠正越界页码并查询，支持所有绑定。"""
+
+        page_size = min(max(int(page_size), 1), 100)
+        clause, values = self._filter_clause(tmdbid=tmdbid, title=title)
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            total = connection.execute(
+                f"SELECT COUNT(*) FROM title_bindings{clause}", values
+            ).fetchone()[0]
+            page_count = max(1, (total + page_size - 1) // page_size)
+            page = min(max(int(page), 1), page_count)
+            rows = connection.execute(
+                f"SELECT * FROM title_bindings{clause} "
+                "ORDER BY updated_at DESC, rowid ASC LIMIT ? OFFSET ?",
+                (*values, page_size, (page - 1) * page_size),
+            ).fetchall()
+        return BindingPage(
+            items=[self._from_row(row) for row in rows], total=total,
+            page=page, page_size=page_size, page_count=page_count,
+        )
 
     def clear_cache(self) -> None:
         """释放插件停止后不再使用的内存缓存。"""

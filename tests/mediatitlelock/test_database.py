@@ -3,6 +3,7 @@ import tempfile
 import sys
 import unittest
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "plugins.v2" / "mediatitlelock"))
@@ -88,6 +89,38 @@ class DatabaseTest(unittest.TestCase):
         self.assertEqual([item.media_id for item in by_title], ["123456"])
         self.assertEqual(self.store.count(tmdbid="015"), 1)
         self.assertEqual(self.store.count(title="另一部"), 1)
+
+    def test_server_pagination_reaches_records_beyond_500_without_duplicates(self):
+        for index in range(626):
+            self.store.insert_if_absent(replace(binding(), media_id=str(index)))
+        ids = []
+        for page in range(1, 27):
+            result = self.store.paginate(page=page, page_size=25)
+            self.assertEqual(result.total, 626)
+            self.assertEqual(result.page_count, 26)
+            ids.extend(item.media_id for item in result.items)
+        self.assertEqual(len(ids), 626)
+        self.assertEqual(len(set(ids)), 626)
+
+    def test_server_pagination_clamps_pages_and_filters_before_counting(self):
+        self.store.insert_if_absent(binding())
+        result = self.store.paginate(page=99, page_size=25, title="首次")
+        self.assertEqual((result.page, result.total), (1, 1))
+        empty = self.store.paginate(page=9, page_size=25, title="不存在")
+        self.assertEqual((empty.page, empty.page_count, empty.total), (1, 1, 0))
+        self.assertEqual(empty.items, [])
+        bounded = self.store.paginate(page=-1, page_size=999999)
+        self.assertEqual((bounded.page, bounded.page_size), (1, 100))
+
+    def test_page_order_uses_existing_index_without_a_temporary_sort(self):
+        with self.store._connect() as connection:
+            plan = connection.execute(
+                "EXPLAIN QUERY PLAN SELECT * FROM title_bindings "
+                "ORDER BY updated_at DESC, rowid ASC LIMIT 25 OFFSET 500"
+            ).fetchall()
+        details = " ".join(row["detail"] for row in plan)
+        self.assertIn("idx_title_bindings_updated_at", details)
+        self.assertNotIn("TEMP B-TREE", details)
 
     def test_legacy_database_migrates_and_keeps_latest_duplicate(self):
         self.temporary_directory.cleanup()
