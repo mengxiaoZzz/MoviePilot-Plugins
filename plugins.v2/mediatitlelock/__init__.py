@@ -22,7 +22,7 @@ from .identity import (
 )
 
 
-UI_REVISION = "20260907-pagination-diagnostics"
+UI_REVISION = "20261016-v2-v3-compat"
 
 
 @dataclass(frozen=True)
@@ -70,7 +70,7 @@ class MediaTitleLock(_PluginBase):
     plugin_name = "媒体标题固定"
     plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.7"
+    plugin_version = "1.0.8"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -174,7 +174,7 @@ class MediaTitleLock(_PluginBase):
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """使用 Vue 主页面承载配置和绑定管理。"""
 
-        return "vue", "dist/v1.0.7/assets"
+        return "vue", "dist/v1.0.8/assets"
 
     def stop_service(self) -> None:
         """清理插件内存缓存。"""
@@ -232,7 +232,7 @@ class MediaTitleLock(_PluginBase):
                 return
             recognized_category = str(getattr(mediainfo, "category", "") or "")
             try:
-                valid = binding.media_category in self._available_categories()
+                valid = binding.media_category in self._available_categories(getattr(mediainfo, "type", None))
                 reason = "绑定分类已失效" if not valid else ""
             except Exception as error:
                 valid = False
@@ -245,7 +245,7 @@ class MediaTitleLock(_PluginBase):
                 self._record("download", "fallback", f"{reason}，沿用 MP 识别分类，不拦截下载或整理", identity,
                              original_category=binding.media_category, effective_category=recognized_category)
                 return
-            mediainfo.category = binding.media_category
+            self._apply_category(mediainfo, binding.media_category)
             if isinstance(getattr(data, "options", None), dict):
                 data.options["media_category"] = binding.media_category
             self._record("download", "applied", "已应用有效的固定分类", identity,
@@ -381,7 +381,8 @@ class MediaTitleLock(_PluginBase):
         try:
             categories = set(self._available_categories())
             category_error = ""
-        except Exception:
+        except Exception as error:
+            logger.warning(f"媒体标题固定：分类列表校验失败 - {error}")
             categories = None
             category_error = "分类配置读取失败，暂无法校验分类；不影响查看绑定"
         items = []
@@ -406,7 +407,15 @@ class MediaTitleLock(_PluginBase):
     def api_categories(self) -> schemas.Response:
         """查询 MoviePilot 当前配置的媒体分类。"""
 
-        categories = self._available_categories()
+        try:
+            categories = self._available_categories()
+        except Exception as error:
+            logger.warning(f"媒体标题固定：读取分类选项失败 - {error}")
+            return schemas.Response(
+                success=False,
+                message="分类配置读取失败，暂无法维护分类；不影响查看绑定，也不会拦截下载或整理",
+                data={"items": []},
+            )
         return schemas.Response(
             success=True,
             message="查询成功",
@@ -420,7 +429,12 @@ class MediaTitleLock(_PluginBase):
             binding = self._binding_from_request(request)
         except ValueError as error:
             return schemas.Response(success=False, message=str(error))
-        if binding.media_category not in self._available_categories():
+        try:
+            categories = self._available_categories()
+        except Exception as error:
+            logger.warning(f"媒体标题固定：保存前分类校验失败 - {error}")
+            return schemas.Response(success=False, message="分类配置读取失败，未修改绑定；请稍后重试")
+        if binding.media_category not in categories:
             return schemas.Response(
                 success=False,
                 message="所选分类不在 MoviePilot 当前分类配置中",
@@ -461,11 +475,25 @@ class MediaTitleLock(_PluginBase):
         )
 
     @staticmethod
-    def _available_categories() -> List[str]:
-        category_config = MediaChain().media_category() or {}
+    def _available_categories(media_type: Any = None) -> List[str]:
+        """V2 读取分类列表；V3 读取启用的安全目录路径，不使用显示名称。"""
+
+        legacy_getter = getattr(MediaChain(), "media_category", None)
+        if not callable(legacy_getter):
+            # MP 3.1.5 的分类 SDK 尚未提供路径列表，复用宿主目录路由的只读解析器。
+            from app.application.classification.reference import classification_category_resolver_snapshot
+
+            resolver = classification_category_resolver_snapshot()
+            return ["/".join(path) for path in resolver.category_paths(media_type) if path]
+        category_config = legacy_getter()
+        if not isinstance(category_config, dict):
+            raise ValueError("MoviePilot 分类配置不可用")
+        type_name = getattr(media_type, "value", media_type)
         categories = []
         seen = set()
-        for group_items in category_config.values():
+        for group_name, group_items in category_config.items():
+            if type_name and group_name != type_name:
+                continue
             if not isinstance(group_items, (list, tuple, set)):
                 continue
             for item in group_items:
@@ -474,6 +502,23 @@ class MediaTitleLock(_PluginBase):
                     seen.add(category)
                     categories.append(category)
         return categories
+
+    @staticmethod
+    def _apply_category(mediainfo: Any, category: str) -> None:
+        """仅在分类校验成功后更新生效结果，保留 V3 自动推荐和其他分类元数据。"""
+
+        if hasattr(mediainfo, "classification"):
+            from app.schemas.category import ClassificationResult, ClassificationSelection
+
+            selection = ClassificationSelection(
+                category_id=None, category_path=category.split("/"), source="manual",
+            )
+            current = mediainfo.classification
+            result = current.model_copy(deep=True) if current is not None else ClassificationResult(state="complete")
+            result.effective = selection
+            mediainfo.classification = result
+            mediainfo.library_category = category
+        mediainfo.category = category
 
     def _require_store(self) -> BindingStore:
         if self._store is None:

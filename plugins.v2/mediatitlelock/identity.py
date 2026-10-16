@@ -21,7 +21,7 @@ class MediaIdentity:
 def normalize_source(value: Any) -> str:
     """标准化媒体来源名称。"""
 
-    source = str(value or "").strip().casefold()
+    source = str(getattr(value, "value", value) or "").strip().casefold()
     return SOURCE_ALIASES.get(source, source)
 
 
@@ -31,7 +31,9 @@ def extract_media_identity(mediainfo: Any) -> Optional[MediaIdentity]:
     if mediainfo is None:
         return None
 
-    source = normalize_source(getattr(mediainfo, "source", None))
+    source = normalize_source(
+        getattr(mediainfo, "media_source", None) or getattr(mediainfo, "source", None)
+    )
     media_id = getattr(mediainfo, "media_id", None)
     source_ids = (
         ("themoviedb", getattr(mediainfo, "tmdb_id", None)),

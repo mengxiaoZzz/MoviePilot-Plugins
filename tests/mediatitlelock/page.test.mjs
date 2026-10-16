@@ -19,8 +19,8 @@ async function mountPage(t) {
       media_source: 'themoviedb', media_id: String(i + 1),
       canonical_title: `测试标题 ${i + 1}`, canonical_year: '2026', media_category: '日韩剧',
     })),
-    posts: [], gets: [], failSave: false,
-    backendVersion: '1.0.7', uiRevision: '20260907-pagination-diagnostics', failList: false,
+    posts: [], gets: [], failSave: false, failCategories: false,
+    backendVersion: '1.0.8', uiRevision: '20261016-v2-v3-compat', failList: false,
     holdNextList: null,
   }
   const api = {
@@ -29,7 +29,9 @@ async function mountPage(t) {
       if (path.endsWith('/config')) return { success: true, data: {
         enabled: true, backend_version: data.backendVersion, ui_revision: data.uiRevision,
       } }
-      if (path.endsWith('/categories')) return { success: true, data: { items: ['日韩剧'] } }
+      if (path.endsWith('/categories')) return data.failCategories
+        ? { success: false, message: '分类配置读取失败，暂无法维护分类；不影响查看绑定，也不会拦截下载或整理', data: { items: [] } }
+        : { success: true, data: { items: ['日韩剧'] } }
       if (path.endsWith('/diagnostics')) return { success: true, data: {
         items: [{ timestamp: '2026-09-07 10:00:00', stage: 'download', status: 'fallback', message: '分类失效，沿用识别分类' }],
         emby_status: 'not_checked',
@@ -47,6 +49,7 @@ async function mountPage(t) {
       return { success: true, data: {
         items: data.items.slice((page - 1) * size, page * size), total: data.items.length,
         page, page_size: size, page_count: pages,
+        category_error: data.failCategories ? '分类配置读取失败，暂无法校验分类；不影响查看绑定' : '',
       } }
     },
     async post(path, payload) {
@@ -73,6 +76,21 @@ test('126 records have six pages; changing page size returns to page one', async
   await state.changePageSize(50)
   assert.equal(state.page, 1)
   assert.equal(state.pageCount, 3)
+})
+
+test('category failure shows the backend reason while bindings remain readable', async t => {
+  const { state, data } = await mountPage(t)
+  data.failCategories = true
+  await state.refreshPage()
+  assert.equal(state.total, 126)
+  assert.equal(state.bindings.length, 25)
+  assert.equal(state.notice.text, '分类配置读取失败，暂无法维护分类；不影响查看绑定，也不会拦截下载或整理')
+  assert.match(state.categoryError, /不影响查看绑定/)
+  await state.changePage(2)
+  assert.equal(state.page, 2)
+  data.failCategories = false
+  await state.refreshPage()
+  assert.equal(state.categoryError, '')
 })
 
 test('removing the last record on the last page clamps the current page', async t => {
