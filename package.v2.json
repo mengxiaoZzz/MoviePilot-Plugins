@@ -7,7 +7,7 @@
     "icon": "mediatitlelock.svg",
     "author": "baixiaofei",
     "level": 1,
-    "v3": false,
+    "v3": true,
     "release": true,
     "history": {
       "v1.0.8": "兼容 MoviePilot V2 与 V3 3.1.5 的分类和媒体身份接口；分类读取失败或失效时保留识别分类，不阻塞新下载整理；保留现有绑定数据。",

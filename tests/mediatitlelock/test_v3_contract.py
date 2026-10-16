@@ -1,6 +1,7 @@
 """可选的 MP V3 源码合同测试；不启动 MP、不访问服务器或用户数据库。"""
 
 import importlib
+import json
 import os
 import subprocess
 import sys
@@ -12,6 +13,11 @@ from unittest.mock import patch
 
 
 class V3ContractTest(unittest.TestCase):
+    def test_market_manifest_declares_v3_compatibility(self):
+        manifest = Path(__file__).resolve().parents[2] / "package.v2.json"
+        plugin = json.loads(manifest.read_text())["MediaTitleLock"]
+        self.assertIs(plugin.get("v3"), True)
+
     @unittest.skipUnless(os.environ.get("MOVIEPILOT_V3_SOURCE"), "未指定 MP V3 源码目录")
     def test_real_category_resolver_and_classification_models(self):
         # 隔离现有测试的 app/pydantic 替身，使用宿主真实分类模型和路径解析器。
@@ -31,6 +37,12 @@ def check_host_contract():
     sys.modules["pydantic"] = pydantic
     sys.modules["app"].__path__ = [str(source / "app")]
     sys.modules["app.schemas"].__path__ = [str(source / "app/schemas")]
+    domain = importlib.import_module("app.domain.plugin")
+    manifest = Path(__file__).resolve().parents[2] / "package.v2.json"
+    metadata = json.loads(manifest.read_text())["MediaTitleLock"]
+    assert domain.is_plugin_generation_compatible(metadata, "v2", current_generation="v3")
+    assert domain.is_plugin_generation_compatible(metadata, "v2", current_generation="v2")
+    assert not domain.is_plugin_generation_compatible({**metadata, "v3": False}, "v2", current_generation="v3")
     del sys.modules["app.schemas.types"]
     host_types = importlib.import_module("app.schemas.types")
     category = importlib.import_module("app.schemas.category")
