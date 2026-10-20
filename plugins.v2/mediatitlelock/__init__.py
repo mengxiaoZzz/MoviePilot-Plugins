@@ -1,5 +1,6 @@
 import threading
 from collections import deque
+from copy import copy
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -20,9 +21,10 @@ from .identity import (
     extract_media_identity,
     normalize_source,
 )
+from .transfer_hook import TransferCategoryHook
 
 
-UI_REVISION = "20261016-v2-v3-compat"
+UI_REVISION = "20261020-transfer-category"
 
 
 @dataclass(frozen=True)
@@ -70,7 +72,7 @@ class MediaTitleLock(_PluginBase):
     plugin_name = "媒体标题固定"
     plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.8"
+    plugin_version = "1.0.9"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -84,6 +86,7 @@ class MediaTitleLock(_PluginBase):
         super().__init__()
         self._records = deque(maxlen=100)
         self._records_lock = threading.Lock()
+        self._transfer_hook = None
 
     def init_plugin(self, config: dict = None) -> None:
         """读取配置并初始化绑定数据库。"""
@@ -93,6 +96,7 @@ class MediaTitleLock(_PluginBase):
         self._store = BindingStore(self.get_data_path() / "title_bindings.sqlite3")
         with self._records_lock:
             self._records.clear()
+        self._configure_transfer_hook()
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
@@ -174,11 +178,14 @@ class MediaTitleLock(_PluginBase):
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """使用 Vue 主页面承载配置和绑定管理。"""
 
-        return "vue", "dist/v1.0.8/assets"
+        return "vue", "dist/v1.0.9/assets"
 
     def stop_service(self) -> None:
         """清理插件内存缓存。"""
 
+        if self._transfer_hook:
+            self._transfer_hook.remove()
+            self._transfer_hook = None
         if self._store:
             self._store.clear_cache()
         with self._records_lock:
@@ -253,6 +260,78 @@ class MediaTitleLock(_PluginBase):
         except Exception as error:
             logger.exception(f"媒体标题固定：下载分类处理失败 - {error}")
             self._record("download", "error", "下载分类处理异常，未拦截任务，详见插件日志")
+
+    def _configure_transfer_hook(self) -> None:
+        if self._transfer_hook:
+            self._transfer_hook.remove()
+            self._transfer_hook = None
+        if not self._enabled:
+            return
+        try:
+            from app.chain.transfer import TransferChain
+
+            hook = TransferCategoryHook(TransferChain, MediaChain, self.lock_transfer_category)
+            hook.install()
+            self._transfer_hook = hook
+        except Exception as error:
+            logger.exception(f"媒体标题固定：整理分类适配未启用，保留 MP 原流程 - {error}")
+            self._record("transfer_category", "error", "整理前置接口不可用，仅新下载分类固定生效，详见插件日志")
+
+    def lock_transfer_category(self, mediainfo: Any) -> Any:
+        """识别完成、目录匹配前处理分类，返回任务副本，不改缓存和绑定。"""
+
+        if not self._enabled or mediainfo is None:
+            return mediainfo
+        try:
+            identity = extract_media_identity(mediainfo)
+            if not identity:
+                return mediainfo
+            binding = self._require_store().get(identity.media_source, identity.media_id)
+            if not binding or not binding.media_category:
+                return mediainfo
+            original_category = str(getattr(mediainfo, "category", "") or "")
+            try:
+                valid = binding.media_category in self._available_categories(getattr(mediainfo, "type", None))
+                reason = "绑定分类已失效" if not valid else ""
+            except Exception as error:
+                valid = False
+                reason = "当前分类配置不可用"
+                logger.warning(f"媒体标题固定：整理分类校验失败，沿用识别分类 - {error}")
+            candidate = copy(mediainfo)
+            if valid:
+                self._apply_category(candidate, binding.media_category)
+            else:
+                classification = getattr(mediainfo, "classification", None)
+                recommended = getattr(classification, "recommended", None)
+                if recommended is not None:
+                    # 下载历史可能已覆盖 effective；回退不能继续使用失效的历史绑定。
+                    result = classification.model_copy(deep=True)
+                    result.effective = result.recommended
+                    candidate.classification = result
+                    candidate.library_category = "/".join(result.recommended.category_path or [])
+                    candidate.category = candidate.library_category
+                elif not hasattr(mediainfo, "classification") and original_category == binding.media_category:
+                    # V2 不保存 recommended；只用已有 TMDB 元数据重新执行本地分类规则。
+                    info = getattr(mediainfo, "tmdb_info", None)
+                    if info:
+                        from app.modules.themoviedb.category import CategoryHelper
+
+                        helper = CategoryHelper()
+                        media_type = getattr(mediainfo.type, "value", mediainfo.type)
+                        if media_type == "电视剧":
+                            candidate.category = helper.get_tv_category(info)
+                        elif media_type == "电影":
+                            candidate.category = helper.get_movie_category(info)
+            effective = str(getattr(candidate, "category", "") or "")
+            message = "整理前已应用有效的固定分类" if valid else f"{reason}，整理沿用识别分类，不拦截入库"
+            self._record("transfer_category", "applied" if valid else "fallback", message, identity,
+                         original_category=original_category, effective_category=effective)
+            logger.info(f"媒体标题固定：{identity.media_source}/{identity.media_id} {message}：{original_category} -> {effective}")
+            return candidate
+        except Exception as error:
+            logger.exception(f"媒体标题固定：整理分类处理异常，保留传入结果继续整理 - {error}")
+            self._record("transfer_category", "error", "整理分类处理异常，已交回 MP 继续处理，详见插件日志")
+            return mediainfo
 
     @eventmanager.register(EventType.TransferComplete)
     def remember_successful_transfer(self, event: Event) -> None:
@@ -342,7 +421,7 @@ class MediaTitleLock(_PluginBase):
             "items": [asdict(record) for record in records],
             "last_applied_at": next((record.timestamp for record in records if record.status == "applied"), ""),
             "emby_status": "not_checked",
-            "category_scope": "new_downloads_only",
+            "category_scope": "downloads_and_transfers" if self._transfer_hook and self._transfer_hook.active else "new_downloads_only",
         })
 
     def api_config(self) -> schemas.Response:
@@ -361,6 +440,7 @@ class MediaTitleLock(_PluginBase):
         saved = self.update_config({"enabled": enabled})
         if saved:
             self._enabled = enabled
+            self._configure_transfer_hook()
         return schemas.Response(
             success=saved,
             message="配置已保存" if saved else "配置保存失败",

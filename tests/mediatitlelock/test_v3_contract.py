@@ -47,6 +47,13 @@ def check_host_contract():
     host_types = importlib.import_module("app.schemas.types")
     category = importlib.import_module("app.schemas.category")
     reference = importlib.import_module("app.application.classification.reference")
+    from test_host_transfer_contract import load_host_class
+
+    # 采用真实 category/library_category 同步语义，不加载 MediaInfo 的无关 YAML 依赖。
+    context_contract = load_host_class(source / "app/domain/context.py", "MediaInfo", ["__setattr__"], {})
+
+    class ContractMedia(SimpleNamespace):
+        __setattr__ = context_contract.__setattr__
 
     policy = category.ClassificationPolicy(revision=7, categories=[
         category.ClassificationCategory(id="tv.jp", media_type="电视剧", name="显示名称与路径不同",
@@ -73,11 +80,12 @@ def check_host_contract():
         def download_event():
             recommended = category.ClassificationSelection(category_id="tv.cn", category_path=["剧集", "国产剧"],
                                                            rule_id="rule.cn", source="automatic")
-            media = SimpleNamespace(
+            media = ContractMedia(
                 media_source=host_types.MediaSource.TMDB, media_id="42", type=host_types.MediaType.TV,
                 title="识别标题", category="剧集/国产剧", library_category="剧集/国产剧",
                 classification=category.ClassificationResult(recommended=recommended, effective=recommended,
                                                             labels=["保留"], policy_revision=7, state="complete"),
+                _category_semantics_ready=True,
             )
             return SimpleNamespace(event_data=SimpleNamespace(
                 context=SimpleNamespace(media_info=media), options={"media_category": media.category}, cancel=False,
@@ -96,6 +104,12 @@ def check_host_contract():
         assert media.classification.effective.source == "manual"
         assert media.library_category == media.category == "剧集/日韩剧"
 
+        transfer_media = download_event().event_data.context.media_info
+        transferred = plugin.lock_transfer_category(transfer_media)
+        assert resolver.resolve_media(transferred).path == ("剧集", "日韩剧")
+        assert transfer_media.category == "剧集/国产剧"
+        assert transferred.classification.recommended == transfer_media.classification.recommended
+
         # 删除、禁用、改路径或改媒体类型后，旧路径不能继续被固定。
         active_categories = policy.categories
         for update in (None, {"enabled": False}, {"path": ["新路径"]}, {"media_type": "电影"}):
@@ -112,11 +126,27 @@ def check_host_contract():
             assert event.event_data.options["media_category"] == "剧集/国产剧"
             assert plugin._store.get("themoviedb", "42") == original_binding
 
+            # 模拟 V3 将旧下载绑定恢复为 effective；整理必须退回自动识别分类。
+            historical = reference.apply_persisted_classification_snapshot(media, reference.persisted_classification_snapshot(
+                category_path="剧集/日韩剧", source="manual",
+            ))
+            transferred = plugin.lock_transfer_category(historical)
+            assert reference.effective_classification_snapshot(transferred).path == "剧集/国产剧"
+            assert resolver.resolve_media(transferred).path == ("剧集", "国产剧")
+            assert transferred.classification.effective.source == "automatic"
+            assert historical.category == "剧集/日韩剧"
+
         event = download_event()
         media = event.event_data.context.media_info
         original_result = media.classification.model_copy(deep=True)
         with patch.object(resolver, "category_paths", side_effect=RuntimeError("模拟分类服务读取失败")):
             plugin.lock_download_category(event)
+            historical = reference.apply_persisted_classification_snapshot(media, reference.persisted_classification_snapshot(
+                category_path="剧集/日韩剧", source="manual",
+            ))
+            transferred = plugin.lock_transfer_category(historical)
+            assert reference.effective_classification_snapshot(transferred).path == "剧集/国产剧"
+            assert resolver.resolve_media(transferred).path == ("剧集", "国产剧")
             assert plugin.api_bindings().data["items"][0]["category_status"] == "unknown"
             assert not plugin.api_categories().success
         assert not event.event_data.cancel

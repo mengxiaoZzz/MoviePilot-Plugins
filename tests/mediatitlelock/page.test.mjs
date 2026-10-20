@@ -20,7 +20,7 @@ async function mountPage(t) {
       canonical_title: `测试标题 ${i + 1}`, canonical_year: '2026', media_category: '日韩剧',
     })),
     posts: [], gets: [], failSave: false, failCategories: false,
-    backendVersion: '1.0.8', uiRevision: '20261016-v2-v3-compat', failList: false,
+    backendVersion: '1.0.9', uiRevision: '20261020-transfer-category', failList: false,
     holdNextList: null,
   }
   const api = {
@@ -91,6 +91,15 @@ test('category failure shows the backend reason while bindings remain readable',
   data.failCategories = false
   await state.refreshPage()
   assert.equal(state.categoryError, '')
+})
+
+test('diagnostics distinguish active transfer hook from download-only fallback', async t => {
+  const { state } = await mountPage(t)
+  assert.match(state.categoryScopeText, /前置适配未启用/)
+  state.diagnostics = { items: [], category_scope: 'downloads_and_transfers' }
+  assert.match(state.categoryScopeText, /整理入库前/)
+  assert.match(state.categoryScopeText, /不移动已入库文件/)
+  assert.equal(state.stageText('transfer_category'), '整理分类')
 })
 
 test('removing the last record on the last page clamps the current page', async t => {

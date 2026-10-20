@@ -115,7 +115,7 @@ class PluginTest(unittest.TestCase):
         render_mode, dist_path = self.plugin.get_render_mode()
 
         self.assertEqual(render_mode, "vue")
-        self.assertEqual(dist_path, "dist/v1.0.8/assets")
+        self.assertEqual(dist_path, "dist/v1.0.9/assets")
         self.assertTrue((plugin_dir / dist_path / "remoteEntry.js").is_file())
         self.assertEqual(self.plugin.get_form(), (None, {}))
         self.assertIsNone(self.plugin.get_page())

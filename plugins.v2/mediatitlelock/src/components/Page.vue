@@ -13,8 +13,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close'])
-const frontendVersion = '1.0.8'
-const frontendRevision = '20261016-v2-v3-compat'
+const frontendVersion = '1.0.9'
+const frontendRevision = '20261020-transfer-category'
 
 const sourceItems = [
   { title: 'TMDB', value: 'themoviedb' },
@@ -63,6 +63,9 @@ const diagnosticsOpen = ref(false)
 const diagnosticsLoading = ref(false)
 const diagnosticsError = ref('')
 const diagnostics = ref({ items: [], last_applied_at: '' })
+const categoryScopeText = computed(() => diagnostics.value.category_scope === 'downloads_and_transfers'
+  ? '新下载及整理入库前应用有效绑定分类；失效或读取失败时沿用识别分类。不移动已入库文件，不改写已冻结的整理计划。'
+  : '整理前置适配未启用，目前仅新下载任务可固定分类；请检查插件启用状态和诊断错误。')
 const notice = reactive({ text: '', type: 'info' })
 const form = reactive({
   media_source: 'themoviedb',
@@ -224,7 +227,7 @@ async function toggleDiagnostics() {
 }
 
 function stageText(stage) {
-  return { download: '下载分类', rename: '标题渲染', transfer: '文件整理' }[stage] || stage
+  return { download: '下载分类', transfer_category: '整理分类', rename: '标题渲染', transfer: '文件整理' }[stage] || stage
 }
 
 function statusColor(status) {
@@ -409,7 +412,7 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
             最近应用（含预览）：{{ diagnostics.last_applied_at || '本次运行暂无记录' }} · Emby 识别：未检测
           </div>
           <VAlert type="info" variant="tonal" density="compact" class="mb-3">
-            分类固定及失效回退仅对新下载任务生效，不追溯修改旧下载任务或手动整理。
+            {{ categoryScopeText }}
             文件整理成功不代表 Emby 已识别，本插件不查询 Emby 状态。
           </VAlert>
           <VAlert v-if="diagnosticsError" type="error" variant="tonal" density="compact" class="mb-3">{{ diagnosticsError }}</VAlert>
@@ -490,7 +493,7 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
             <VChip size="small" variant="tonal" :color="normalizeRow(item).category_status === 'valid' ? 'primary' : 'warning'">
               {{ normalizeRow(item).category }}
             </VChip>
-            <div v-if="normalizeRow(item).category_status === 'invalid'" class="text-caption text-warning">已失效 · 新下载沿用识别分类</div>
+            <div v-if="normalizeRow(item).category_status === 'invalid'" class="text-caption text-warning">已失效 · 沿用识别分类</div>
             <div v-else-if="normalizeRow(item).category_status === 'unknown'" class="text-caption text-medium-emphasis">暂无法校验</div>
           </template>
           <template #item.actions="{ item }">
