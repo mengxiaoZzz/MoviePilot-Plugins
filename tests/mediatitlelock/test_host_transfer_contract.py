@@ -1,4 +1,4 @@
-"""执行官方整理方法的原始 AST，在目录选择处截停；不导入 MP 服务或访问媒体文件。"""
+"""执行官方整理方法的原始 AST；隔离存储服务，不访问媒体文件。"""
 
 import ast
 import os
@@ -53,7 +53,7 @@ class HostTransferContractTest(unittest.TestCase):
 
         class DirectoryHelper:
             def get_dir(self, media, **kwargs):
-                routed.append(Path("/media") / media.category)
+                routed.append((Path("/media") / media.category, media.title, media.year))
                 raise DirectoryReached()
 
         namespace = dict(
@@ -77,17 +77,19 @@ class HostTransferContractTest(unittest.TestCase):
             plugin._enabled = True
             plugin._store = plugin_module.BindingStore(Path(directory) / "bindings.sqlite3")
             plugin._store.upsert(plugin_module.TitleBinding(
-                media_source="themoviedb", media_id="333553", canonical_title="神之手", media_category="剧集/港台剧集",
+                media_source="themoviedb", media_id="333553", canonical_title="神之手", canonical_year="2025",
+                media_category="剧集/港台剧集",
             ))
             binding = plugin._store.get("themoviedb", "333553")
-            hook = TransferCategoryHook(chain_class, HostMediaChain, plugin.lock_transfer_category)
+            hook = TransferCategoryHook(chain_class, HostMediaChain, plugin.lock_transfer_binding)
             hook.install()
             try:
                 for state in ("valid", "invalid", "unavailable"):
                     for manual in (False, True):
                         with self.subTest(host=owner, state=state, manual=manual):
                             media = SimpleNamespace(media_source=source.TMDB, source=source.TMDB, media_id="333553",
-                                                    type=media_type.TV, tmdb_id=None, category="剧集/南亚剧集")
+                                                    type=media_type.TV, tmdb_id=None, category="剧集/南亚剧集",
+                                                    title="识别新标题", year="2026")
                             task = SimpleNamespace(mediainfo=media, meta=SimpleNamespace(), plan_checkpoint=None,
                                                    planning_input=None, planning_context_restored=False,
                                                    target_directory=None, target_storage=None,
@@ -99,8 +101,81 @@ class HostTransferContractTest(unittest.TestCase):
                                 with self.assertRaises(DirectoryReached):
                                     chain._TransferChain__handle_transfer(task)
                             expected = "剧集/港台剧集" if state == "valid" else "剧集/南亚剧集"
-                            self.assertEqual(routed[-1], Path("/media") / expected)
+                            self.assertEqual(routed[-1], (Path("/media") / expected, "神之手", "2025"))
                             self.assertEqual(media.category, "剧集/南亚剧集")
+                            self.assertEqual(media.title, "识别新标题")
                             self.assertEqual(plugin._store.get("themoviedb", "333553"), binding)
+            finally:
+                hook.remove()
+
+    @unittest.skipUnless(os.environ.get("MOVIEPILOT_V3_SOURCE"), "未指定 MP V3 源码目录")
+    def test_v3_real_execution_callback_saves_before_return_without_broadcast(self):
+        path = Path(os.environ["MOVIEPILOT_V3_SOURCE"]) / "app/chain/transfer/execution.py"
+        self.check_completion(path, "TransferExecutionOwner", ["_TransferChain__handle_transfer", "_TransferChain__perform_transfer"])
+
+    @unittest.skipUnless(os.environ.get("MOVIEPILOT_V2_TRANSFER_SOURCE"), "未指定 MP V2 整理源码文件")
+    def test_v2_real_execution_callback_saves_before_return_without_broadcast(self):
+        self.check_completion(os.environ["MOVIEPILOT_V2_TRANSFER_SOURCE"], "TransferChain", ["__handle_transfer"])
+
+    def check_completion(self, path, owner, methods):
+        media_type = SimpleNamespace(TV=SimpleNamespace(value="电视剧"))
+
+        class HostMediaChain:
+            def supplement_tmdb_info(self, mediainfo, metainfo=None):
+                return mediainfo
+
+        namespace = dict(
+            MediaChain=HostMediaChain, MediaType=media_type, TransferHistoryOper=Mock(),
+            settings=SimpleNamespace(SCRAP_FOLLOW_TMDB=True),
+            defer_music_recognition=lambda *_: None, refresh_music_retry_context=lambda *_: None,
+            use_music_cue=lambda *_: nullcontext(), logger=Mock(),
+            StorageOperSelectionEventData=lambda **kwargs: SimpleNamespace(**kwargs),
+            eventmanager=SimpleNamespace(send_event=lambda *_: None),
+            ChainEventType=SimpleNamespace(StorageOperSelection="storage"),
+        )
+        chain_class = load_host_class(path, owner, methods, namespace)
+        chain = chain_class()
+        chain.transfer_history_repository = Mock()
+        chain.runtime_config = SimpleNamespace(scrape_follow_tmdb=True)
+        chain.jobview = Mock()
+        chain._finish_scrape_batch_task = Mock()
+        chain._TransferChain__finish_scrape_batch_task = Mock()
+        chain._TransferChain__record_uncheckpointed_failure = Mock()
+        chain._transfer_validation_error = lambda _: None
+        chain._requires_automatic_category = lambda _: False
+        chain._TransferChain__select_storage_oper = lambda _: None
+        info = SimpleNamespace(success=True, message="完成", target_item=object(), target_diritem=None)
+        chain.transfer = lambda **_: info
+        chain._plan_checkpoint_and_execute = lambda *args, **kwargs: info
+        predicate = "_TransferChain__is_media_file" if owner == "TransferChain" else "_is_media_file"
+        setattr(chain, predicate, lambda fileitem: fileitem.extension == "mkv")
+        with tempfile.TemporaryDirectory() as directory:
+            database = Path(directory) / "bindings.sqlite3"
+            plugin = plugin_module.MediaTitleLock()
+            plugin._enabled = True
+            plugin._store = plugin_module.BindingStore(database)
+            hook = TransferCategoryHook(chain_class, HostMediaChain, plugin.lock_transfer_binding, plugin.remember_transfer_result)
+            hook.install()
+            try:
+                media = SimpleNamespace(media_source="themoviedb", source="themoviedb", media_id="332649",
+                                        type=media_type.TV, tmdb_id=None, title="首次标题", year="2026", category="日韩剧")
+                task = SimpleNamespace(mediainfo=media, meta=SimpleNamespace(), plan_checkpoint=None,
+                                       planning_input=None, planning_context_restored=False, preview=False,
+                                       target_directory=object(), target_storage="local", target_path=None,
+                                       fileitem=SimpleNamespace(storage="local", path="/download/S01E01.mkv", extension="mkv"),
+                                       transfer_type="move", episodes_info=None, scrape=False,
+                                       library_type_folder=False, library_category_folder=True)
+                if owner != "TransferChain":
+                    task.terminal_settled = False
+
+                def callback(completed, result):
+                    if hasattr(completed, "terminal_settled"):
+                        completed.terminal_settled = True
+                    return result.success, result.message
+
+                self.assertEqual(chain._TransferChain__handle_transfer(task, callback), (True, "完成"))
+                saved = plugin_module.BindingStore(database).get("themoviedb", "332649")
+                self.assertIsNotNone(saved)
+                self.assertEqual(saved.canonical_title, "首次标题")
             finally:
                 hook.remove()

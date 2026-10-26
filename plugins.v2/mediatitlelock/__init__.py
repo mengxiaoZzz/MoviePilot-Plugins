@@ -15,6 +15,7 @@ from app.plugins import _PluginBase
 from app.schemas.types import ChainEventType, EventType
 
 from .database import BindingStore, TIME_FORMAT, TitleBinding
+from .download_hook import DownloadBindingHook
 from .identity import (
     MediaIdentity,
     apply_locked_title,
@@ -24,7 +25,7 @@ from .identity import (
 from .transfer_hook import TransferCategoryHook
 
 
-UI_REVISION = "20261020-transfer-category"
+UI_REVISION = "20261026-download-binding"
 
 
 @dataclass(frozen=True)
@@ -70,9 +71,9 @@ class MediaTitleLock(_PluginBase):
     """按“媒体来源 + 来源内 ID”固定整理标题。"""
 
     plugin_name = "媒体标题固定"
-    plugin_desc = "首次入库后固定媒体标题与分类，避免元数据变化产生多个目录。"
+    plugin_desc = "下载或首次整理时固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.9"
+    plugin_version = "1.0.10"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -87,6 +88,7 @@ class MediaTitleLock(_PluginBase):
         self._records = deque(maxlen=100)
         self._records_lock = threading.Lock()
         self._transfer_hook = None
+        self._download_hook = None
 
     def init_plugin(self, config: dict = None) -> None:
         """读取配置并初始化绑定数据库。"""
@@ -97,6 +99,7 @@ class MediaTitleLock(_PluginBase):
         with self._records_lock:
             self._records.clear()
         self._configure_transfer_hook()
+        self._configure_download_hook()
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
@@ -178,11 +181,14 @@ class MediaTitleLock(_PluginBase):
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """使用 Vue 主页面承载配置和绑定管理。"""
 
-        return "vue", "dist/v1.0.9/assets"
+        return "vue", "dist/v1.0.10/assets"
 
     def stop_service(self) -> None:
         """清理插件内存缓存。"""
 
+        if self._download_hook:
+            self._download_hook.remove()
+            self._download_hook = None
         if self._transfer_hook:
             self._transfer_hook.remove()
             self._transfer_hook = None
@@ -213,8 +219,14 @@ class MediaTitleLock(_PluginBase):
                 )
                 self._record("rename", "applied", "已注入固定标题（含预览，不代表文件整理成功）", identity,
                              original_title=original_title, effective_title=binding.canonical_title)
+                logger.info(
+                    f"媒体标题固定：标题渲染命中 {identity.media_source}/{identity.media_id}，"
+                    f"标题 {original_title!r} -> {binding.canonical_title!r}，绑定来源={binding.origin}，"
+                    f"绑定更新时间={binding.updated_at}，源路径={getattr(event.event_data, 'source_path', None)!r}"
+                )
             else:
                 self._record("rename", "skipped", "尚无绑定，沿用 MP 识别标题", identity)
+                logger.info(f"媒体标题固定：标题渲染未命中 {identity.media_source}/{identity.media_id}，沿用识别标题")
         except Exception as error:
             logger.exception(f"媒体标题固定：重命名上下文处理失败 - {error}")
             self._record("rename", "error", "标题处理异常，已交回 MP 继续处理，详见插件日志")
@@ -261,6 +273,56 @@ class MediaTitleLock(_PluginBase):
             logger.exception(f"媒体标题固定：下载分类处理失败 - {error}")
             self._record("download", "error", "下载分类处理异常，未拦截任务，详见插件日志")
 
+    def _configure_download_hook(self) -> None:
+        if self._download_hook:
+            self._download_hook.remove()
+            self._download_hook = None
+        if not self._enabled:
+            return
+        try:
+            from app.chain.download import DownloadChain
+
+            hook = DownloadBindingHook(DownloadChain, self.remember_download_binding)
+            hook.install()
+            self._download_hook = hook
+        except Exception as error:
+            logger.exception(f"媒体标题固定：下载绑定适配未启用，保留 MP 原流程 - {error}")
+            self._record("download_binding", "error", "下载绑定接口不可用，仍在首次整理成功后补充绑定，详见插件日志")
+
+    def remember_download_binding(self, mediainfo: Any, download_hash: str) -> None:
+        """下载器已经接收任务；新增绑定失败不改变下载结果。"""
+
+        if not self._enabled or not download_hash:
+            return
+        try:
+            media_type = getattr(mediainfo, "type", None)
+            if getattr(media_type, "value", media_type) not in ("电影", "电视剧"):
+                return
+            identity = extract_media_identity(mediainfo)
+            title = str(getattr(mediainfo, "title", "") or "").strip()
+            category = str(getattr(mediainfo, "category", "") or "").strip()
+            if not identity or not title or not category:
+                missing = "媒体身份" if not identity else "标题" if not title else "分类"
+                self._record("download_binding", "skipped", f"下载器已接收任务；缺少{missing}，暂不建立绑定", identity)
+                return
+            store = self._require_store()
+            inserted = False
+            if not store.get(identity.media_source, identity.media_id):
+                inserted = store.insert_if_absent(TitleBinding(
+                    media_source=identity.media_source, media_id=identity.media_id,
+                    canonical_title=title, canonical_year=str(getattr(mediainfo, "year", "") or ""),
+                    media_category=category, origin="download",
+                ))
+            action = "已保存绑定" if inserted else "保留已有绑定"
+            logger.info(
+                f"媒体标题固定：下载接收后{action} {identity.media_source}/{identity.media_id}，"
+                f"识别标题={title!r}，识别分类={category!r}，下载任务={download_hash}"
+            )
+            self._record("download_binding", "success", f"下载器已接收任务；{action}", identity)
+        except Exception as error:
+            logger.exception(f"媒体标题固定：下载接收后保存绑定失败，不影响下载或整理 - {error}")
+            self._record("download_binding", "error", "下载器已接收任务；绑定保存失败，整理成功后继续补偿，详见插件日志")
+
     def _configure_transfer_hook(self) -> None:
         if self._transfer_hook:
             self._transfer_hook.remove()
@@ -270,12 +332,43 @@ class MediaTitleLock(_PluginBase):
         try:
             from app.chain.transfer import TransferChain
 
-            hook = TransferCategoryHook(TransferChain, MediaChain, self.lock_transfer_category)
+            hook = TransferCategoryHook(
+                TransferChain, MediaChain, self.lock_transfer_binding, self.remember_transfer_result,
+            )
             hook.install()
             self._transfer_hook = hook
         except Exception as error:
-            logger.exception(f"媒体标题固定：整理分类适配未启用，保留 MP 原流程 - {error}")
-            self._record("transfer_category", "error", "整理前置接口不可用，仅新下载分类固定生效，详见插件日志")
+            logger.exception(f"媒体标题固定：整理前置适配未启用，保留 MP 原流程 - {error}")
+            self._record("transfer_category", "error", "整理前置接口不可用，标题仍由渲染事件处理；分类仅新下载生效，详见插件日志")
+
+    def lock_transfer_binding(self, mediainfo: Any) -> Any:
+        """整理前在任务副本上固定标题；分类失败不会撤销标题固定。"""
+
+        candidate = self.lock_transfer_category(mediainfo)
+        if not self._enabled or candidate is None:
+            return candidate
+        try:
+            identity = extract_media_identity(candidate)
+            if not identity:
+                return candidate
+            binding = self._require_store().get(identity.media_source, identity.media_id)
+            if not binding:
+                logger.info(f"媒体标题固定：整理前未命中 {identity.media_source}/{identity.media_id}，沿用识别标题")
+                return candidate
+            locked = copy(candidate)
+            locked.title = binding.canonical_title
+            if binding.canonical_year:
+                locked.year = binding.canonical_year
+            logger.info(
+                f"媒体标题固定：整理前命中 {identity.media_source}/{identity.media_id}，"
+                f"标题 {getattr(candidate, 'title', '')!r} -> {locked.title!r}，"
+                f"年份 {getattr(candidate, 'year', '')!r} -> {getattr(locked, 'year', '')!r}，"
+                f"绑定来源={binding.origin}，绑定更新时间={binding.updated_at}"
+            )
+            return locked
+        except Exception as error:
+            logger.exception(f"媒体标题固定：整理前标题处理异常，保留识别结果继续整理 - {error}")
+            return candidate
 
     def lock_transfer_category(self, mediainfo: Any) -> Any:
         """识别完成、目录匹配前处理分类，返回任务副本，不改缓存和绑定。"""
@@ -335,19 +428,27 @@ class MediaTitleLock(_PluginBase):
 
     @eventmanager.register(EventType.TransferComplete)
     def remember_successful_transfer(self, event: Event) -> None:
-        """仅在文件成功整理后建立首次标题绑定。"""
+        """异步完成事件仅作补偿；重复或延迟事件不覆盖已有绑定。"""
 
         if not self._enabled or not event or not event.event_data:
             return
+        event_data = event.event_data
+        transferinfo = event_data.get("transferinfo")
+        if transferinfo and not transferinfo.success:
+            self.record_failed_transfer(event)
+            return
+        self.remember_transfer_result(event_data.get("mediainfo"), transferinfo, via="完成事件补偿")
+
+    def remember_transfer_result(self, mediainfo: Any, transferinfo: Any, via: str = "同步整理完成") -> None:
+        """宿主成功回调返回后同步落库；写入异常不改变已完成的整理结果。"""
+
+        if not self._enabled:
+            return
         try:
-            event_data = event.event_data
-            mediainfo = event_data.get("mediainfo")
-            transferinfo = event_data.get("transferinfo")
             if not transferinfo:
                 self._record("transfer", "skipped", "没有整理结果，未建立绑定")
                 return
             if not transferinfo.success:
-                self.record_failed_transfer(event)
                 return
             identity = extract_media_identity(mediainfo)
             title = str(getattr(mediainfo, "title", "") or "").strip()
@@ -375,9 +476,11 @@ class MediaTitleLock(_PluginBase):
             )
             if inserted:
                 logger.info(
-                    f"媒体标题固定：已记录 {identity.media_source}/"
-                    f"{identity.media_id} -> {title}"
+                    f"媒体标题固定：{via}已保存绑定 {identity.media_source}/"
+                    f"{identity.media_id}，标题={title!r}，分类={category!r}"
                 )
+            else:
+                logger.info(f"媒体标题固定：{via}保留已有绑定 {identity.media_source}/{identity.media_id}")
             self._record("transfer", "success",
                          "文件整理成功；已自动建立绑定" if inserted else "文件整理成功；保留已有绑定",
                          identity)
@@ -441,6 +544,7 @@ class MediaTitleLock(_PluginBase):
         if saved:
             self._enabled = enabled
             self._configure_transfer_hook()
+            self._configure_download_hook()
         return schemas.Response(
             success=saved,
             message="配置已保存" if saved else "配置保存失败",
@@ -508,18 +612,34 @@ class MediaTitleLock(_PluginBase):
         try:
             binding = self._binding_from_request(request)
         except ValueError as error:
+            logger.warning(f"媒体标题固定：手工保存失败，参数无效 - {error}")
             return schemas.Response(success=False, message=str(error))
         try:
             categories = self._available_categories()
         except Exception as error:
-            logger.warning(f"媒体标题固定：保存前分类校验失败 - {error}")
+            logger.warning(f"媒体标题固定：手工保存失败 {binding.media_source}/{binding.media_id}，分类校验异常 - {error}")
             return schemas.Response(success=False, message="分类配置读取失败，未修改绑定；请稍后重试")
         if binding.media_category not in categories:
+            logger.warning(f"媒体标题固定：手工保存失败 {binding.media_source}/{binding.media_id}，分类已失效={binding.media_category!r}")
             return schemas.Response(
                 success=False,
                 message="所选分类不在 MoviePilot 当前分类配置中",
             )
-        saved = self._require_store().upsert(binding)
+        try:
+            store = self._require_store()
+            previous = store.get(binding.media_source, binding.media_id)
+            saved = store.upsert(binding)
+        except Exception as error:
+            logger.exception(f"媒体标题固定：手工保存失败 {binding.media_source}/{binding.media_id}，写入异常 - {error}")
+            return schemas.Response(success=False, message="标题绑定保存失败，请查看插件日志")
+        if saved:
+            logger.info(
+                f"媒体标题固定：手工保存成功 {binding.media_source}/{binding.media_id}，"
+                f"标题 {previous.canonical_title if previous else None!r} -> {binding.canonical_title!r}，"
+                f"年份={binding.canonical_year!r}，分类={binding.media_category!r}"
+            )
+        else:
+            logger.warning(f"媒体标题固定：手工保存失败 {binding.media_source}/{binding.media_id}，未写入记录")
         return schemas.Response(
             success=saved,
             message="标题绑定已保存" if saved else "标题绑定保存失败",

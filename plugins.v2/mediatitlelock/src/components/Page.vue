@@ -13,8 +13,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close'])
-const frontendVersion = '1.0.9'
-const frontendRevision = '20261020-transfer-category'
+const frontendVersion = '1.0.10'
+const frontendRevision = '20261026-download-binding'
 
 const sourceItems = [
   { title: 'TMDB', value: 'themoviedb' },
@@ -98,6 +98,7 @@ function showMessage(text, type = 'info') {
 
 function originText(origin) {
   return {
+    download: '首次下载',
     automatic: '首次整理',
     manual: '人工维护',
     emby: '历史导入',
@@ -227,7 +228,7 @@ async function toggleDiagnostics() {
 }
 
 function stageText(stage) {
-  return { download: '下载分类', transfer_category: '整理分类', rename: '标题渲染', transfer: '文件整理' }[stage] || stage
+  return { download: '下载分类', download_binding: '下载绑定', transfer_category: '整理分类', rename: '标题渲染', transfer: '文件整理' }[stage] || stage
 }
 
 function statusColor(status) {
@@ -374,7 +375,7 @@ onBeforeUnmount(() => clearTimeout(noticeTimer))
         <VCardText class="mtl-settings-content">
           <div>
             <div class="text-subtitle-1 font-weight-medium">标题与分类固定</div>
-            <div class="text-caption text-medium-emphasis">首次整理成功后自动记录，后续整理沿用绑定。</div>
+            <div class="text-caption text-medium-emphasis">下载器接收任务后自动记录，整理前沿用绑定；手动整理成功后补充记录。</div>
           </div>
           <div class="d-flex align-center ga-3">
             <VSwitch
