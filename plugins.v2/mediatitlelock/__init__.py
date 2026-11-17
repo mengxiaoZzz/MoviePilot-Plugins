@@ -16,6 +16,7 @@ from app.schemas.types import ChainEventType, EventType
 
 from .database import BindingStore, TIME_FORMAT, TitleBinding
 from .download_hook import DownloadBindingHook
+from .partial_path_hook import ShortPartialPathHook
 from .identity import (
     MediaIdentity,
     apply_locked_title,
@@ -89,6 +90,7 @@ class MediaTitleLock(_PluginBase):
         self._records_lock = threading.Lock()
         self._transfer_hook = None
         self._download_hook = None
+        self._partial_path_hook = None
 
     def init_plugin(self, config: dict = None) -> None:
         """读取配置并初始化绑定数据库。"""
@@ -100,6 +102,7 @@ class MediaTitleLock(_PluginBase):
             self._records.clear()
         self._configure_transfer_hook()
         self._configure_download_hook()
+        self._configure_partial_path_hook()
 
     def get_state(self) -> bool:
         """返回插件启用状态。"""
@@ -186,6 +189,9 @@ class MediaTitleLock(_PluginBase):
     def stop_service(self) -> None:
         """清理插件内存缓存。"""
 
+        if self._partial_path_hook:
+            self._partial_path_hook.remove()
+            self._partial_path_hook = None
         if self._download_hook:
             self._download_hook.remove()
             self._download_hook = None
@@ -272,6 +278,24 @@ class MediaTitleLock(_PluginBase):
         except Exception as error:
             logger.exception(f"媒体标题固定：下载分类处理失败 - {error}")
             self._record("download", "error", "下载分类处理异常，未拦截任务，详见插件日志")
+
+    def _configure_partial_path_hook(self) -> None:
+        if self._partial_path_hook:
+            self._partial_path_hook.remove()
+            self._partial_path_hook = None
+        if not self._enabled:
+            return
+        try:
+            from app.modules.filemanager.storages.local import LocalStorage
+
+            hook = ShortPartialPathHook(LocalStorage)
+            hook.install()
+            self._partial_path_hook = hook
+            logger.info("媒体标题固定：短临时文件名适配已启用，使用 .<UUID>.mp-partial，保留最终入库命名")
+            self._record("transfer", "success", "短临时文件名适配已启用，保留最终入库命名")
+        except Exception as error:
+            logger.warning(f"媒体标题固定：临时文件名适配未启用，保留 MP 原流程 - {error}")
+            self._record("transfer", "skipped", "临时文件名接口不兼容或不可用，保留 MP 原流程，详见插件日志")
 
     def _configure_download_hook(self) -> None:
         if self._download_hook:
@@ -545,6 +569,7 @@ class MediaTitleLock(_PluginBase):
             self._enabled = enabled
             self._configure_transfer_hook()
             self._configure_download_hook()
+            self._configure_partial_path_hook()
         return schemas.Response(
             success=saved,
             message="配置已保存" if saved else "配置保存失败",
