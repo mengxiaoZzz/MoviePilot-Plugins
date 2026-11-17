@@ -13,8 +13,8 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['close'])
-const frontendVersion = '1.0.10'
-const frontendRevision = '20261026-download-binding'
+const frontendVersion = '1.0.11'
+const frontendRevision = '20261117-short-partial'
 
 const sourceItems = [
   { title: 'TMDB', value: 'themoviedb' },

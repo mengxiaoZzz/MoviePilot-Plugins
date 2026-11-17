@@ -20,7 +20,7 @@ async function mountPage(t) {
       canonical_title: `测试标题 ${i + 1}`, canonical_year: '2026', media_category: '日韩剧',
     })),
     posts: [], gets: [], failSave: false, failCategories: false,
-    backendVersion: '1.0.10', uiRevision: '20261026-download-binding', failList: false,
+    backendVersion: '1.0.11', uiRevision: '20261117-short-partial', failList: false,
     holdNextList: null,
   }
   const api = {

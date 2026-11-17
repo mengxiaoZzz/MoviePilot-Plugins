@@ -26,7 +26,7 @@ from .identity import (
 from .transfer_hook import TransferCategoryHook
 
 
-UI_REVISION = "20261026-download-binding"
+UI_REVISION = "20261117-short-partial"
 
 
 @dataclass(frozen=True)
@@ -74,7 +74,7 @@ class MediaTitleLock(_PluginBase):
     plugin_name = "媒体标题固定"
     plugin_desc = "下载或首次整理时固定媒体标题与分类，避免元数据变化产生多个目录。"
     plugin_icon = "mediatitlelock.svg"
-    plugin_version = "1.0.10"
+    plugin_version = "1.0.11"
     plugin_author = "baixiaofei"
     author_url = ""
     plugin_config_prefix = "mediatitlelock_"
@@ -184,7 +184,7 @@ class MediaTitleLock(_PluginBase):
     def get_render_mode() -> Tuple[str, Optional[str]]:
         """使用 Vue 主页面承载配置和绑定管理。"""
 
-        return "vue", "dist/v1.0.10/assets"
+        return "vue", "dist/v1.0.11/assets"
 
     def stop_service(self) -> None:
         """清理插件内存缓存。"""
